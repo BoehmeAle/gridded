@@ -555,14 +555,19 @@ class Grid(object):
             cls = Grid._get_grid_type(dg, grid_type, grid_topology, _default_types)
 
         # if grid_topology is passed in, don't look for the variable
-        if not grid_topology:
+        if grid_topology is None:
             compliant = Grid._find_topology_var(None, dg)
+        elif 'cf_role' in grid_topology.keys() and 'topology' in grid_topology['cf_role']:
+            compliant = grid_topology
         else:
             compliant = None
 
         if compliant is not None:
             c = Grid._load_grid(filename, cls, dg)
-            c.grid_topology = compliant.__dict__
+            if hasattr(compliant, '__dict__'):
+                c.grid_topology = compliant.__dict__
+            else:
+                c.grid_topology = compliant
         else:
             init_args, gt = cls._find_required_grid_attrs(filename,
                                                           dataset=dg,
