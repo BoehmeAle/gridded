@@ -288,3 +288,4 @@ def load_grid_from_ncfilename(filename, grid, mesh_name=None):  # , load_data=Tr
 
     with netCDF4.Dataset(filename, 'r') as nc:
         load_grid_from_nc_dataset(nc, grid, mesh_name)  # , load_data)
+    grid.filename = filename
