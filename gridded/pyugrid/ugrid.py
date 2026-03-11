@@ -1011,6 +1011,19 @@ class UGrid():
         """
         self.save(filename, format='netcdf4')
 
+    def get_time_dimension(self, variables):
+        time_dimension = None
+        for var in variables.values():
+            if var.time is not None:
+                if time_dimension is None:
+                    time_dimension = var.time.data
+                elif time_dimension != var.time:
+                    raise ValueError("All variables must have no or matching time dimensions.")
+        return time_dimension
+
+    def _topo_attr(self, topo_attr):
+        topo_attr_pl = '_boundaries' if topo_attr == 'boundary' else '_{0}s'.format(topo_attr)
+        return getattr(self, topo_attr_pl)
 
     def save(self, filepath, format='netcdf4', variables={}):
         """
@@ -1036,19 +1049,33 @@ class UGrid():
 
         nclocal = get_writable_dataset(filepath)
 
-        nclocal.createDimension(mesh_name + "_num_node", len(self.nodes))
-        if self._edges is not None:
-            nclocal.createDimension(
-                mesh_name + "_num_edge", len(self._edges))
-        if self._boundaries is not None:
-            nclocal.createDimension(mesh_name + "_num_boundary",
-                                    len(self._boundaries))
-        if self._faces is not None:
-            nclocal.createDimension(
-                mesh_name + "_num_face", len(self._faces))
-            nclocal.createDimension(mesh_name + "_num_vertices",
-                                    self._faces.shape[1])
+        for topo_attr_name in ['node', 'edge', 'boundary', 'face']:
+            if self._topo_attr(topo_attr_name) is not None:
+                nclocal.createDimension(
+                    "{0}_num_{1}".format(mesh_name, topo_attr_name),
+                    len(self._topo_attr(topo_attr_name))
+                )
+                if topo_attr_name == 'face':
+                    nclocal.createDimension(mesh_name + "_num_vertices",
+                                            self._faces.shape[1])
         nclocal.createDimension("two", 2)
+
+        # optional time dimension
+        time_dimension = self.get_time_dimension(variables)
+        if time_dimension is not None:
+            number_of_timesteps = len(time_dimension)
+            nclocal.createDimension('time', number_of_timesteps)
+            rd = datetime(1970, 1, 1)
+            time = nclocal.createVariable(
+                'time', np.float64, ('time',),
+                chunksizes=(number_of_timesteps,)
+            )
+            time[:] = [(t - rd).total_seconds() for t in time_dimension]
+            time.standard_name = 'time'
+            time.long_name = 'time since reference datetime'
+            time.units = 'seconds since 1970-01-01 00:00:00'
+            time.calendar = 'gregorian'
+            time.cf_role = 'time'
 
         # mesh topology
         mesh = nclocal.createVariable(mesh_name, IND_DT, (),)
@@ -1079,88 +1106,51 @@ class UGrid():
         if self._boundaries is not None:
             mesh.boundary_node_connectivity = mesh_name + "_boundary_nodes"
 
-        # FIXME: This could be re-factored to be more generic, rather than
-        # separate for each type of data see the coordinates example below.
-        if self._faces is not None:
-            nc_create_var = nclocal.createVariable
-            face_nodes = nc_create_var(mesh_name + "_face_nodes", IND_DT,
-                                       (mesh_name + '_num_face',
-                                        mesh_name + '_num_vertices'),)
-            face_nodes[:] = self.faces
-
-            face_nodes.cf_role = "face_node_connectivity"
-            face_nodes.long_name = ("Maps every triangular face to "
-                                    "its three corner nodes.")
-            face_nodes.start_index = IND_DT(0)
-
-        if self._edges is not None:
-            nc_create_var = nclocal.createVariable
-            edge_nodes = nc_create_var(mesh_name + "_edge_nodes", IND_DT,
-                                       (mesh_name + '_num_edge', 'two'),)
-            edge_nodes[:] = self.edges
-
-            edge_nodes.cf_role = "edge_node_connectivity"
-            edge_nodes.long_name = ("Maps every edge to the two "
-                                    "nodes that it connects.")
-            edge_nodes.start_index = IND_DT(0)
-
-        if self._boundaries is not None:
-            nc_create_var = nclocal.createVariable
-            boundary_nodes = nc_create_var(mesh_name + "_boundary_nodes",
-                                           IND_DT,
-                                           (mesh_name + '_num_boundary',
-                                            'two'),)
-            boundary_nodes[:] = self.boundaries
-
-            boundary_nodes.cf_role = "boundary_node_connectivity"
-            boundary_nodes.long_name = ("Maps every boundary segment to "
-                                        "the two nodes that it connects.")
-            boundary_nodes.start_index = IND_DT(0)
-
-        # Optional "coordinate variables."
-        for location in ['face', 'edge', 'boundary']:
-            loc = "{0}_coordinates".format(location)
-            if getattr(self, loc) is not None:
+        for location in ['node', 'face', 'edge', 'boundary']:
+            if location != 'node' and self._topo_attr(location) is not None:
+                second_dim = mesh_name + '_num_vertices' if location == 'face' else 'two'
+                var = nclocal.createVariable(
+                    '{0}_{1}_nodes'.format(mesh_name, location), IND_DT,
+                    ('{0}_num_{1}'.format(mesh_name, location), second_dim)
+                )
+                var[:] = self._topo_attr(location)
+                var.cf_role = '{0}_node_connectivity'.format(location)
+                if location == 'face':
+                    var.long_name = ("Maps every triangular face "
+                                    "to its three corner nodes.")
+                elif location == 'edge':
+                    var.long_name = ("Maps every edge to the "
+                                    "two nodes that it connects.")
+                elif location == 'boundary':
+                    var.long_name = ("Maps every boundary segment to "
+                                    "the two nodes that it connects.")
+                var.start_index = IND_DT(0)
+            
+            # Optional "coordinate variables."
+            loc_coord = location if location == 'node' else "{0}_coordinates".format(location)
+            if getattr(self, loc_coord) is not None:
                 for axis, ind in [('lat', 1), ('lon', 0)]:
-                    nc_create_var = nclocal.createVariable
                     name = "{0}_{1}_{2}".format(mesh_name, location, axis)
                     dimensions = "{0}_num_{1}".format(mesh_name, location)
-                    var = nc_create_var(name, NODE_DT,
-                                        dimensions=(dimensions),)
-                    loc = "{0}_coordinates".format(location)
-                    var[:] = getattr(self, loc)[:, ind]
+                    chunksizes = (len(self.nodes),) if location == 'node' else None
+                    var = nclocal.createVariable(name, NODE_DT,
+                                                 dimensions=dimensions,
+                                                 chunksizes=chunksizes)
+                    var[:] = getattr(self, loc_coord)[:, ind]
                     # Attributes of the variable.
                     var.standard_name = ("longitude" if axis == 'lon'
                                          else 'latitude')
                     var.units = ("degrees_east" if axis == 'lon'
                                  else 'degrees_north')
-                    name = "Characteristics {0} of 2D mesh {1}".format
-                    var.long_name = name(var.standard_name, location)
-
-        # The node data.
-        node_lon = nclocal.createVariable(mesh_name + '_node_lon',
-                                          self._nodes.dtype,
-                                          (mesh_name + '_num_node',),
-                                          chunksizes=(len(self.nodes),),
-                                          # zlib=False,
-                                          # complevel=0,
-                                          )
-        node_lon[:] = self.nodes[:, 0]
-        node_lon.standard_name = "longitude"
-        node_lon.long_name = "Longitude of 2D mesh nodes."
-        node_lon.units = "degrees_east"
-
-        node_lat = nclocal.createVariable(mesh_name + '_node_lat',
-                                          self._nodes.dtype,
-                                          (mesh_name + '_num_node',),
-                                          chunksizes=(len(self.nodes),),
-                                          # zlib=False,
-                                          # complevel=0,
-                                          )
-        node_lat[:] = self.nodes[:, 1]
-        node_lat.standard_name = "latitude"
-        node_lat.long_name = "Latitude of 2D mesh nodes."
-        node_lat.units = "degrees_north"
+                    if location == 'node':
+                        description = ''
+                    elif location == 'edge':
+                        description = 'Characteristic '
+                    else:
+                        description = 'Characteristics '
+                    var.long_name = "{0}{1} of 2D mesh {2}".format(
+                        description, var.standard_name, location
+                    )
 
         self._save_variables(nclocal, variables)
 
@@ -1173,31 +1163,20 @@ class UGrid():
         """
         mesh_name = self.mesh_name
         for name, var in variables.items():
-            if var.location == 'node':
-                shape = (mesh_name + '_num_node',)
-                coordinates = "{0}_node_lon {0}_node_lat".format(mesh_name)
-                chunksizes = (len(self.nodes),)
-            elif var.location == 'face':
-                shape = (mesh_name + '_num_face',)
-                coord = "{0}_face_lon {0}_face_lat".format
-                coordinates = (coord(mesh_name) if self.face_coordinates
-                               is not None else None)
-                chunksizes = (len(self.faces),)
-            elif var.location == 'edge':
-                shape = (mesh_name + '_num_edge',)
-                coord = "{0}_edge_lon {0}_edge_lat".format
-                coordinates = (coord(mesh_name) if self.edge_coordinates
-                               is not None else None)
-                chunksizes = (len(self.edges),)
-            elif var.location == 'boundary':
-                shape = (mesh_name + '_num_boundary',)
-                coord = "{0}_boundary_lon {0}_boundary_lat".format
-                bcoord = self.boundary_coordinates
-                coordinates = (coord(mesh_name) if bcoord
-                               is not None else None)
-                chunksizes = (len(self.boundaries),)
+            location = var.location
+            if var.time is not None:
+                shape = ('time', '{0}_num_{1}'.format(mesh_name, location))
+                chunksizes = (1, len(self._topo_attr(location)))
             else:
-                raise ValueError("I don't know how to save a variable located on: {}".format(var.location))
+                shape = (f'{mesh_name}_num_{location}',)
+                chunksizes = (len(self._topo_attr(location)),)
+            add_coordinates = (
+                    location == 'node'
+                    or getattr(self, '{0}_coordinates'.format(location)) is not None
+            )
+            coordinates = '{0}_{1}_lon {0}_{1}_lat'.format(mesh_name, location) \
+                if add_coordinates else None
+            
             print("Saving:", var)
             print("name is:", var.name)
             print("var data is:", var.data)
