@@ -1127,7 +1127,7 @@ class UGrid():
                 var.start_index = IND_DT(0)
             
             # Optional "coordinate variables."
-            loc_coord = location if location == 'node' else "{0}_coordinates".format(location)
+            loc_coord = 'nodes' if location == 'node' else "{0}_coordinates".format(location)
             if getattr(self, loc_coord) is not None:
                 for axis, ind in [('lat', 1), ('lon', 0)]:
                     name = "{0}_{1}_{2}".format(mesh_name, location, axis)
